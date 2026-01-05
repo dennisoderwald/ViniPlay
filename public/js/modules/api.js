@@ -25,7 +25,7 @@ export async function apiFetch(url, options = {}) {
             showLoginScreen("Your session has expired. Please log in again.");
             return null; // Prevent further processing of this response
         }
-        
+
         // Handle other non-ok responses
         if (!response.ok) {
             let errorData = {};
@@ -60,7 +60,11 @@ export async function fetchConfig() {
         console.error('[API] Failed to fetch config: No response from apiFetch.');
         return null;
     }
-    
+
+    // DEBUG: Log headers to check for cache status
+    console.log('[DEBUG_CLIENT] /api/config Response Headers:');
+    response.headers.forEach((val, key) => console.log(`  ${key}: ${val}`));
+
     try {
         const config = await response.json();
         console.log('[API] Application configuration fetched successfully.');
@@ -69,6 +73,24 @@ export async function fetchConfig() {
         console.error('[API] Error parsing config JSON:', e);
         showNotification('Failed to parse server configuration.', true);
         return null;
+    }
+}
+
+/**
+ * Fetches the application version from the server.
+ * @returns {Promise<string>} The version string (e.g., "1.0.0") or "Unknown" on failure.
+ */
+export async function fetchAppVersion() {
+    console.log('[API] Fetching app version from /api/version.');
+    const response = await apiFetch('/api/version');
+    if (!response) return 'Unknown';
+
+    try {
+        const data = await response.json();
+        return data.version || 'Unknown';
+    } catch (e) {
+        console.error('[API] Error parsing version JSON:', e);
+        return 'Unknown';
     }
 }
 
@@ -99,7 +121,7 @@ export async function saveUserSetting(key, value) {
         } else {
             console.error(`[API] Server responded success but did not return settings for key: ${key}`);
             showNotification(`Setting for "${key}" was saved, but the server response was incomplete.`, true);
-            return null; 
+            return null;
         }
     } catch (e) {
         console.error('[API] Error parsing response from saveUserSetting:', e);
@@ -280,12 +302,12 @@ export async function clearPastNotifications() {
  * @param {string} streamUrl - The URL of the stream to stop.
  * @returns {Promise<boolean>} - True on success, false on failure.
  */
-export async function stopStream(streamUrl) {
-    console.log('[API] Sending request to stop the current stream on the server.');
+export async function stopStream(streamUrl, profileId = null) {
+    console.log(`[API] Sending request to stop the current stream on the server. ProfileID: ${profileId || 'N/A'}`);
     const res = await apiFetch('/api/stream/stop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: streamUrl })
+        body: JSON.stringify({ url: streamUrl, profileId })
     });
     return res && res.ok;
 }
@@ -335,7 +357,7 @@ export async function stopRedirectStream(historyId) {
 export async function fetchVodLibrary() {
     console.log('[API] Fetching VOD library from /api/vod/library.');
     // Add timestamp to prevent caching
-    const response = await apiFetch(`/api/vod/library?t=${Date.now()}`); 
+    const response = await apiFetch(`/api/vod/library?t=${Date.now()}`);
     if (!response) {
         console.error('[API] Failed to fetch VOD library: No response from apiFetch.');
         return null;

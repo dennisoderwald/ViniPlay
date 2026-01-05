@@ -94,7 +94,7 @@ export function openProgramDetails(progItem) {
         detailsFavoriteBtn.onclick = (e) => {
             e.stopPropagation();
             channelData.isFavorite = !channelData.isFavorite;
-            
+
             // MODIFIED: Toggle the class on the icon, not the button.
             if (favoriteIcon) {
                 favoriteIcon.classList.toggle('favorited', channelData.isFavorite);
@@ -110,7 +110,7 @@ export function openProgramDetails(progItem) {
             saveUserSetting('favorites', guideState.settings.favorites);
 
             if (UIElements.groupFilter.value === 'favorites') {
-                handleSearchAndFilter();
+                handleSearchAndFilter(false, true);
             }
         };
     }
@@ -149,7 +149,7 @@ export function openProgramDetails(progItem) {
                 programDetailsNotifyBtn.classList.toggle('hover:bg-yellow-700', !updatedNotification);
                 programDetailsNotifyBtn.classList.toggle('bg-gray-600', !!updatedNotification);
                 programDetailsNotifyBtn.classList.toggle('hover:bg-gray-500', !!updatedNotification);
-                handleSearchAndFilter(false);
+                handleSearchAndFilter(false, true);
             };
         } else {
             programDetailsNotifyBtn.classList.add('hidden');
@@ -199,7 +199,7 @@ export function openProgramDetails(progItem) {
             programDetailsRecordBtn.onclick = async () => {
                 await addOrRemoveDvrJob(programData);
                 closeModal(programDetailsModal);
-                handleSearchAndFilter(false);
+                handleSearchAndFilter(false, true);
             };
 
         } else {
@@ -224,7 +224,10 @@ export function openProgramDetails(progItem) {
  * @param {string} m3uContent - The M3U playlist content.
  * @param {object} epgContent - The parsed EPG JSON data.
  */
-export async function handleGuideLoad(m3uContent, epgContent) {
+export async function handleGuideLoad(m3uContent, epgContent, shouldCenter = false) {
+    console.log('[GUIDE_LOAD_DEBUG] handleGuideLoad called with shouldCenter:', shouldCenter);
+    console.log('[GUIDE_LOAD_DEBUG] m3uContent length:', m3uContent?.length || 0);
+
     if (!m3uContent || m3uContent.trim() === '#EXTM3U') {
         guideState.channels = [];
         guideState.programs = {};
@@ -238,7 +241,8 @@ export async function handleGuideLoad(m3uContent, epgContent) {
         await appState.db.transaction(['guideData'], 'readwrite').objectStore('guideData').put(guideState.programs, 'programs');
     }
 
-    return finalizeGuideLoad(true);
+    console.log('[GUIDE_LOAD_DEBUG] About to call finalizeGuideLoad with shouldCenter:', shouldCenter);
+    return finalizeGuideLoad(shouldCenter);
 }
 
 /**
@@ -285,9 +289,9 @@ const getEpgDateRange = () => {
 
 /**
  * Finalizes the guide setup after data is loaded from any source (API or cache).
- * @param {boolean} isFirstLoad - Indicates if this is the initial load of the guide.
+ * @param {boolean} shouldCenter - Indicates if the guide should auto-center to current time.
  */
-export function finalizeGuideLoad(isFirstLoad = false) {
+export function finalizeGuideLoad(shouldCenter = false) {
     const favoriteIds = new Set(guideState.settings.favorites || []);
     guideState.channels.forEach(channel => {
         channel.isFavorite = favoriteIds.has(channel.id);
@@ -331,7 +335,7 @@ export function finalizeGuideLoad(isFirstLoad = false) {
                 const progStart = new Date(prog.start);
                 const progStop = new Date(prog.stop);
                 if (progStop < guideStart || progStart > guideEnd) return;
-                    
+
                 allPrograms.push({
                     ...prog,
                     channel: {
@@ -352,7 +356,7 @@ export function finalizeGuideLoad(isFirstLoad = false) {
         includeScore: true,
     });
 
-    return handleSearchAndFilter(isFirstLoad);
+    return handleSearchAndFilter(shouldCenter);
 }
 
 // --- UI Rendering (REFACTORED FOR VIRTUALIZATION) ---
@@ -361,9 +365,10 @@ export function finalizeGuideLoad(isFirstLoad = false) {
  * Renders the guide using UI virtualization.
  * @param {Array<object>} channelsToRender - The filtered list of channels to display.
  * @param {boolean} resetScroll - If true, scrolls the guide to the top-left.
+ * @param {boolean} shouldCenter - If true, centers the guide on the current time.
  * @returns {Promise<boolean>} A promise that resolves when the initial render is complete.
  */
-const renderGuide = (channelsToRender, resetScroll = false) => {
+const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false) => {
     return new Promise((resolve) => {
         guideState.visibleChannels = channelsToRender;
         const totalRows = channelsToRender.length;
@@ -379,12 +384,68 @@ const renderGuide = (channelsToRender, resetScroll = false) => {
             return;
         }
 
-        const guideStart = new Date(guideState.currentDate);
-        guideStart.setHours(0, 0, 0, 0);
-        const guideStartUtc = new Date(Date.UTC(guideStart.getUTCFullYear(), guideStart.getUTCMonth(), guideStart.getUTCDate()));
+        // Create a proper UTC midnight for the selected calendar date
+        // We use the local date components (year, month, day) to create a UTC timestamp
+        // IMPORTANT: EPG times are stored in local timezone but with UTC suffix (e.g., "2025-12-02T00:00:00.000Z" means midnight LOCAL time)
+        // So we need to shift the guide start back by the timezone offset to align with the EPG data
+        const selectedDate = new Date(guideState.currentDate);
+        const offset = guideState.settings.timezoneOffset || 0;
+        const offsetMs = offset * 3600000; // Convert hours to milliseconds
+        const guideStartUtc = new Date(Date.UTC(
+            selectedDate.getFullYear(),
+            selectedDate.getMonth(),
+            selectedDate.getDate(),
+            0, 0, 0, 0
+        ) - offsetMs); // Shift back by timezone offset to align with EPG data
+
+
         const timelineWidth = guideState.guideDurationHours * guideState.hourWidthPixels;
         UIElements.guideGrid.style.setProperty('--timeline-width', `${timelineWidth}px`);
         UIElements.guideDateDisplay.textContent = guideState.currentDate.toLocaleDateString([], { weekday: 'short', month: 'long', day: 'numeric' });
+
+        // CRITICAL FIX: Ensure static HTML elements exist
+        // They may have been removed by a previous render with no data (line 382)
+        if (!UIElements.guideGrid.querySelector('.sticky-corner')) {
+            const stickyCorner = document.createElement('div');
+            stickyCorner.className = 'sticky-corner flex items-center justify-center p-2 sm:p-4';
+            stickyCorner.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <button id="now-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Now</button>
+                </div>
+                <div id="channel-column-resize-handle" class="channel-resize-handle"></div>
+            `;
+            UIElements.guideGrid.appendChild(stickyCorner);
+
+            // CRITICAL: Reattach resize event listener to the new handle
+            // Update UIElements reference to the new element
+            UIElements.channelColumnResizeHandle = document.getElementById('channel-column-resize-handle');
+
+            // Reattach the resize listener (only on desktop)
+            if (UIElements.channelColumnResizeHandle && window.innerWidth >= 768) {
+                import('./ui.js').then(({ makeColumnResizable }) => {
+                    makeColumnResizable(UIElements.channelColumnResizeHandle, UIElements.guideGrid, 100, 'channelColumnWidth', '--channel-col-width');
+                });
+            }
+        }
+
+        if (!UIElements.guideGrid.querySelector('.time-bar-cell')) {
+            const timeBarCell = document.createElement('div');
+            timeBarCell.className = 'time-bar-cell';
+            // Insert immediately after sticky-corner to ensure it's in the correct grid position (row 1, column 2)
+            const stickyCorner = UIElements.guideGrid.querySelector('.sticky-corner');
+            if (stickyCorner) {
+                stickyCorner.insertAdjacentElement('afterend', timeBarCell);
+            } else {
+                UIElements.guideGrid.appendChild(timeBarCell);
+            }
+        }
+
+        if (!document.getElementById('now-line')) {
+            const nowLine = document.createElement('div');
+            nowLine.id = 'now-line';
+            nowLine.className = 'absolute top-0 bg-red-500 w-0.5 z-30 pointer-events-none hidden';
+            UIElements.guideGrid.appendChild(nowLine);
+        }
 
         const timeBarCellEl = UIElements.guideGrid.querySelector('.time-bar-cell');
         if (timeBarCellEl) {
@@ -473,7 +534,9 @@ const renderGuide = (channelsToRender, resetScroll = false) => {
                 let programsHTML = '';
                 const now = new Date();
                 const guideEnd = new Date(guideStartUtc.getTime() + guideState.guideDurationHours * 3600 * 1000);
-                (guideState.programs[channel.id] || []).forEach(prog => {
+
+                let programCount = 0;
+                (guideState.programs[channel.id] || []).forEach((prog, progIndex) => {
                     const progStart = new Date(prog.start);
                     const progStop = new Date(prog.stop);
                     if (progStop < guideStartUtc || progStart > guideEnd) return;
@@ -481,11 +544,21 @@ const renderGuide = (channelsToRender, resetScroll = false) => {
                     const durationMs = progStop - progStart;
                     if (durationMs <= 0) return;
 
-                    const left = ((progStart.getTime() - guideStartUtc.getTime()) / 3600000) * guideState.hourWidthPixels;
-                    const width = (durationMs / 3600000) * guideState.hourWidthPixels;
+                    // Calculate the raw left position (can be negative if program starts before guide)
+                    let left = ((progStart.getTime() - guideStartUtc.getTime()) / 3600000) * guideState.hourWidthPixels;
+                    let width = (durationMs / 3600000) * guideState.hourWidthPixels;
+
+                    // If program starts before the guide's time range, clip it to the visible area
+                    if (left < 0) {
+                        // Adjust width to compensate for the clipped portion
+                        width = width + left; // left is negative, so this reduces the width
+                        left = 0; // Clip to the left edge
+                    }
+                    programCount++;
+
                     const isLive = now >= progStart && now < progStop;
                     const progressWidth = isLive ? ((now - progStart) / durationMs) * 100 : 0;
-                    
+
                     const uniqueProgramId = `${channel.id}-${progStart.toISOString()}-${progStop.toISOString()}`;
 
                     const hasNotification = findNotificationForProgram({ ...prog, programId: uniqueProgramId }, channel.id);
@@ -513,11 +586,21 @@ const renderGuide = (channelsToRender, resetScroll = false) => {
         guideState.scrollHandler = throttle(updateVisibleRows, 16);
         guideContainer.addEventListener('scroll', guideState.scrollHandler);
 
+        // MODIFIED: Preserve vertical scroll position if not resetting
+        const currentScrollTop = guideContainer.scrollTop;
+
         if (resetScroll) {
             guideContainer.scrollTop = 0;
+            guideContainer.scrollLeft = 0;
+        } else {
+            // Restore vertical scroll after a short delay to allow layout update
+            requestAnimationFrame(() => {
+                guideContainer.scrollTop = currentScrollTop;
+
+            });
         }
         updateVisibleRows();
-        updateNowLine(guideStartUtc, resetScroll);
+        updateNowLine(guideStartUtc, shouldCenter);
 
         const nowBtn = UIElements.guideGrid.querySelector('#now-btn');
         if (nowBtn) nowBtn.onclick = () => {
@@ -526,9 +609,16 @@ const renderGuide = (channelsToRender, resetScroll = false) => {
                 guideState.currentDate = now;
                 finalizeGuideLoad(true);
             } else {
-                const guideStart = new Date(guideState.currentDate);
-                guideStart.setHours(0, 0, 0, 0);
-                const guideStartUtc = new Date(Date.UTC(guideStart.getUTCFullYear(), guideStart.getUTCMonth(), guideStart.getUTCDate()));
+                // Create a proper UTC midnight for the current date (same logic as renderGuide)
+                const selectedDate = new Date(guideState.currentDate);
+                const offset = guideState.settings.timezoneOffset || 0;
+                const offsetMs = offset * 3600000;
+                const guideStartUtc = new Date(Date.UTC(
+                    selectedDate.getFullYear(),
+                    selectedDate.getMonth(),
+                    selectedDate.getDate(),
+                    0, 0, 0, 0
+                ) - offsetMs);
                 updateNowLine(guideStartUtc, true);
             }
         };
@@ -549,6 +639,8 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
     const now = new Date();
     const nowValue = now.getTime();
     const guideEnd = new Date(guideStartUtc.getTime() + guideState.guideDurationHours * 3600 * 1000);
+
+    // Use the actual channel column width from settings for all devices
     const channelInfoColWidth = guideState.settings.channelColumnWidth;
 
     if (nowValue >= guideStartUtc.getTime() && nowValue <= guideEnd.getTime()) {
@@ -557,7 +649,7 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
         nowLineEl.classList.remove('hidden');
         if (shouldScroll) {
             setTimeout(() => {
-                const isMobile = window.innerWidth < 768; 
+                const isMobile = window.innerWidth < 768;
                 let scrollLeft;
 
                 if (isMobile) {
@@ -565,17 +657,17 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
                 } else {
                     scrollLeft = leftOffsetInScrollableArea - (UIElements.guideContainer.clientWidth / 4);
                 }
-                
+
                 UIElements.guideContainer.scrollTo({
                     left: Math.max(0, scrollLeft),
                     behavior: 'smooth'
                 });
             }, 500);
-        }        
+        }
     } else {
         nowLineEl.classList.add('hidden');
     }
-    
+
     document.querySelectorAll('.programme-item').forEach(item => {
         const progStart = new Date(item.dataset.progStart);
         const progStop = new Date(item.dataset.progStop);
@@ -592,6 +684,24 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
     setTimeout(() => updateNowLine(guideStartUtc, false), 60000);
 };
 
+/**
+ * Exported helper to update NOW line position without scrolling.
+ * Used when column is resized to recalculate the NOW line position.
+ */
+export const updateNowLinePosition = () => {
+    // Create a proper UTC midnight for the current date (same logic as renderGuide)
+    const selectedDate = new Date(guideState.currentDate);
+    const offset = guideState.settings.timezoneOffset || 0;
+    const offsetMs = offset * 3600000;
+    const guideStartUtc = new Date(Date.UTC(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        0, 0, 0, 0
+    ) - offsetMs);
+    updateNowLine(guideStartUtc, false);
+};
+
 // --- Filtering and Searching ---
 
 /**
@@ -604,14 +714,14 @@ const populateGroupFilter = () => {
         const cleanGroup = group.replace(/"/g, '&quot;');
         UIElements.groupFilter.innerHTML += `<option value="${cleanGroup}">${group}</option>`;
     });
-    
+
     // Set the value based on saved setting, falling back to 'all'
     if (savedFilter && UIElements.groupFilter.querySelector(`option[value="${savedFilter.replace(/"/g, '&quot;')}"]`)) {
         UIElements.groupFilter.value = savedFilter;
     } else {
         UIElements.groupFilter.value = 'all';
     }
-    
+
     UIElements.groupFilter.classList.remove('hidden');
 };
 
@@ -626,7 +736,7 @@ const populateSourceFilter = () => {
         const cleanSource = source.replace(/"/g, '&quot;');
         UIElements.sourceFilter.innerHTML += `<option value="${cleanSource}">${source}</option>`;
     });
-    
+
     if (savedFilter && UIElements.sourceFilter.querySelector(`option[value="${savedFilter.replace(/"/g, '&quot;')}"]`)) {
         UIElements.sourceFilter.value = savedFilter;
     } else {
@@ -639,10 +749,10 @@ const populateSourceFilter = () => {
 
 /**
  * Filters channels based on dropdowns and rerenders the guide.
- * @param {boolean} isFirstLoad - Indicates if this is the initial load.
+ * @param {boolean} shouldCenter - Indicates if the guide should auto-center to current time.
  * @returns {Promise<boolean>} A promise that resolves when the re-render is complete.
  */
-export function handleSearchAndFilter(isFirstLoad = false) {
+export function handleSearchAndFilter(shouldCenter = false, preserveScroll = false) {
     const searchTerm = UIElements.searchInput.value.trim().toLowerCase();
     const selectedGroup = UIElements.groupFilter.value;
     const selectedSource = UIElements.sourceFilter.value;
@@ -696,9 +806,9 @@ export function handleSearchAndFilter(isFirstLoad = false) {
         const channelIdsFromChannelSearch = new Set(channelResults.map(r => r.item.id));
         const channelIdsFromProgramSearch = new Set(programResults.map(r => r.item.channel.id));
         const allRelevantChannelIds = new Set([...channelIdsFromChannelSearch, ...channelIdsFromProgramSearch]);
-        
+
         channelsForGuide = channelSearchPool.filter(ch => allRelevantChannelIds.has(ch.id));
-        
+
         // Render the search results dropdown.
         renderSearchResults(channelResults, programResults); //renderSearchResults(channelResults.slice(0, 10), programResults);
 
@@ -711,7 +821,14 @@ export function handleSearchAndFilter(isFirstLoad = false) {
     }
 
     // 3. Finally, render the guide with the correct list of channels.
-    return renderGuide(channelsForGuide, isFirstLoad);
+    // When shouldCenter is true, we DON'T want to reset scroll (let it stay where it is)
+    // Then we'll center it to the now line
+    // MODIFIED: Logic for resetScroll.
+    // If preserveScroll is true, we NEVER reset.
+    // If shouldCenter is true, we also don't reset (because we want to scroll to a specific place, not 0,0).
+    // So we only reset if BOTH are false.
+    const resetScroll = !shouldCenter && !preserveScroll;
+    return renderGuide(channelsForGuide, resetScroll, shouldCenter);
 };
 /**
  * Renders the search results dropdown.
@@ -766,7 +883,7 @@ const renderSearchResults = (channelResults, programResults) => {
  */
 const throttle = (func, limit) => {
     let inThrottle;
-    return function() {
+    return function () {
         const args = arguments;
         const context = this;
         if (!inThrottle) {
@@ -831,13 +948,13 @@ export function setupGuideEventListeners() {
         saveUserSetting('activeGroupFilter', selectedGroup);
         // Update local state immediately for responsiveness
         guideState.settings.activeGroupFilter = selectedGroup;
-        handleSearchAndFilter();
+        handleSearchAndFilter(true); // Auto-center when filter changes
     });
     UIElements.sourceFilter.addEventListener('change', () => {
         const selectedSource = UIElements.sourceFilter.value;
         saveUserSetting('activeSourceFilter', selectedSource);
         guideState.settings.activeSourceFilter = selectedSource;
-        handleSearchAndFilter();
+        handleSearchAndFilter(true); // Auto-center when filter changes
     });
     UIElements.searchInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -856,7 +973,7 @@ export function setupGuideEventListeners() {
             const date = new Date(e.target.valueAsDate);
             const userTimezoneOffset = date.getTimezoneOffset() * 60000;
             guideState.currentDate = new Date(date.getTime() + userTimezoneOffset);
-            
+
             finalizeGuideLoad(true);
         }
     });
@@ -929,19 +1046,19 @@ export function setupGuideEventListeners() {
                 }, 500);
             }
         } else if (programItem) {
-             const progStart = new Date(programItem.dataset.progStart);
-             const guideStart = new Date(guideState.currentDate);
-             guideStart.setHours(0,0,0,0);
+            const progStart = new Date(programItem.dataset.progStart);
+            const guideStart = new Date(guideState.currentDate);
+            guideStart.setHours(0, 0, 0, 0);
 
-             const dateDiff = Math.floor((progStart - guideStart) / (1000 * 60 * 60 * 24));
-             if (dateDiff !== 0) {
-                 guideState.currentDate.setDate(guideState.currentDate.getDate() + dateDiff);
-                 finalizeGuideLoad();
-             }
+            const dateDiff = Math.floor((progStart - guideStart) / (1000 * 60 * 60 * 24));
+            if (dateDiff !== 0) {
+                guideState.currentDate.setDate(guideState.currentDate.getDate() + dateDiff);
+                finalizeGuideLoad();
+            }
 
             setTimeout(() => {
                 const programElement = UIElements.guideGrid.querySelector(`.programme-item[data-prog-start="${programItem.dataset.progStart}"][data-channel-id="${programItem.dataset.channelId}"]`);
-                if(programElement) {
+                if (programElement) {
                     const scrollLeft = programElement.offsetLeft - (UIElements.guideContainer.clientWidth / 4);
                     UIElements.guideContainer.scrollTo({ left: scrollLeft, behavior: 'smooth' });
 
